@@ -34,6 +34,7 @@ impl Default for Type {
 pub enum ConversionError {
     MissingValue(String),
     TimestampFormat(chrono::format::ParseError),
+    TimestampParsing(),
 }
 
 impl Display for ConversionError {
@@ -41,6 +42,7 @@ impl Display for ConversionError {
         match self {
             ConversionError::MissingValue(key) => write!(f, "required value \"{}\" was omitted", key),
             ConversionError::TimestampFormat(err) => write!(f, "could not parse timestamp: {}", err),
+            ConversionError::TimestampParsing() => write!(f, "could not parse timestamp"),
         }
     }
 }
@@ -94,9 +96,13 @@ pub fn unwrap_if_required<'a, T>(key: &str, option: Option<T>, required: bool) -
 fn json_to_date_time(json: &serde_json::Value) -> Result<Option<DateTime<FixedOffset>>, ConversionError> {
     if json.is_number() {
         let timestamp = json.as_f64().unwrap();
-        let naive = NaiveDateTime::from_timestamp_opt(timestamp.floor() as i64, (1e9 * timestamp.fract()) as u32).unwrap();
+        let naive = NaiveDateTime::from_timestamp_opt(timestamp.floor() as i64, (1e9 * timestamp.fract()) as u32);
         let offset = FixedOffset::west_opt(0).unwrap();
-        Ok(Some(TimeZone::from_utc_datetime(&offset, &naive)))
+        if naive.is_none() {
+            Err(ConversionError::TimestampParsing())
+        } else {
+            Ok(Some(TimeZone::from_utc_datetime(&offset, &naive.unwrap())))
+        }
     } else if json.is_string() {
         Ok(Some(DateTime::parse_from_rfc3339(json.as_str().unwrap())
             .map_err(|err| ConversionError::TimestampFormat(err))?))

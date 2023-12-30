@@ -10,7 +10,7 @@ use std::fs;
 use std::ops::Deref;
 use std::process::exit;
 
-use clap::{AppSettings, Arg};
+use clap::{arg, Command, value_parser};
 use postgres::NoTls;
 use r2d2::Pool;
 use r2d2_postgres::PostgresConnectionManager;
@@ -173,45 +173,44 @@ impl fairing::Fairing for SystemdLaunchNotification {
 }
 
 fn run() -> Result<(), RunError> {
-    let matches = clap::App::new("Attolytics")
+    let matches = Command::new("Attolytics")
+        .bin_name("attolytics")
         .author(clap::crate_authors!())
         .version(clap::crate_version!())
         .about("A simple web server that stores analytics events into a database")
-        .setting(AppSettings::NextLineHelp)
-        .arg(Arg::with_name("schema_file")
-            .long("--schema").short("-s").value_name("path/to/schema.conf.yaml")
+        // .setting(AppSettings::NextLineHelp)
+        .arg(arg!(--schema <SCHEMA>)
+            .short('s')
+            .value_name("path/to/schema.conf.yaml")
             .help("Schema configuration file to use")
-            .takes_value(true).default_value("./schema.conf.yaml"))
-        .arg(Arg::with_name("db_url")
-             .long("--db_url").short("-d").value_name("postgres://user:pass@host:port/database")
+            .default_value("./schema.conf.yaml"))
+        .arg(arg!(--db_url <DB_URL>)
+             .short('d')
+             .value_name("postgres://user:pass@host:port/database")
              .help("URL of the PostgreSQL database; see https://github.com/sfackler/rust-postgres#connecting for the format")
-             .takes_value(true).required(true))
-        .arg(Arg::with_name("host")
-             .long("--host").short("-H").value_name("host")
+             .required(true))
+        .arg(arg!(--host <HOST>)
+             .short('h')
+             .value_name("host")
              .help("Hostname or IP address to listen on")
-             .takes_value(true).default_value("localhost"))
-        .arg(Arg::with_name("port")
-             .long("--port").short("-p").value_name("port_number")
+             .default_value("localhost"))
+        .arg(arg!(--port <PORT>)
+             .short('p')
+             .value_name("port_number")
              .help("Port number to listen on")
-             .takes_value(true).default_value("8000")
-             .validator(|arg| arg.parse::<u16>().map(|_| ()).map_err(|err| format!("{}", err))))
-        .arg(Arg::with_name("verbose")
-             .long("--verbose").short("-v")
-             .help("Produce more verbose logging; may be given up to 2 times")
-             .multiple(true))
-        .arg(Arg::with_name("quiet")
-             .long("--quiet").short("-q")
-             .help("Produce no output")
-             .multiple(true))
+             .default_value("8000")
+             .value_parser(value_parser!(u16).range(1..)))
+        .arg(arg!(-v --verbose ... "Produce more verbose logging; may be given up to 2 times"))
+        .arg(arg!(-q --quiet ... "Produce no output"))
         .get_matches();
 
-    let schema_file_name = matches.value_of("schema_file").unwrap();
+    let schema_file_name = matches.get_one::<String>("schema").unwrap();
     let schema_yaml_str = fs::read_to_string(schema_file_name)
         .map_err(|err| RunError(format!("failed to read schema file {}: {}", schema_file_name, err)))?;
     let schema = Schema::from_yaml(&schema_yaml_str)
         .map_err(|err| RunError(format!("failed to parse schema file {}: {}", schema_file_name, err)))?;
 
-    let manager = PostgresConnectionManager::new(matches.value_of("db_url").unwrap().to_owned().parse().unwrap(), NoTls);
+    let manager = PostgresConnectionManager::new(matches.get_one::<String>("db_url").unwrap().to_owned().parse().unwrap(), NoTls);
         // .map_err(|err| RunError(format!("failed to open database: {}", err)))?;
     let db_conn_pool = Pool::new(manager)
         .map_err(|err| RunError(format!("failed to create connection pool: {}", err)))?;
@@ -221,7 +220,7 @@ fn run() -> Result<(), RunError> {
     db::create_tables(&schema, &mut conn)
         .map_err(|err| RunError(format!("failed to initialize database tables: {}", err)))?;
 
-    let verbosity = 1i32 + matches.occurrences_of("verbose") as i32 - matches.occurrences_of("quiet") as i32;
+    let verbosity = 1i32 + *matches.get_one::<u8>("verbose").unwrap() as i32 - *matches.get_one::<u8>("quiet").unwrap() as i32;
     let logging_level = match verbosity {
         0 => LoggingLevel::Off,
         1 => LoggingLevel::Critical,
@@ -230,8 +229,8 @@ fn run() -> Result<(), RunError> {
         _ => if verbosity < 0 { LoggingLevel::Off } else { LoggingLevel::Debug },
     };
     let config = Config::build(Environment::active().map_err(|err| RunError(format!("invalid ROCKET_ENV value: {}", err)))?)
-        .address(matches.value_of("host").unwrap())
-        .port(matches.value_of("port").unwrap().parse::<u16>().unwrap())
+        .address(matches.get_one::<String>("host").unwrap())
+        .port(*matches.get_one::<u16>("port").unwrap())
         .keep_alive(0)
         .log_level(logging_level)
         .limits(Limits::new().limit("json", 32 * 1024))

@@ -1,6 +1,6 @@
 use std::convert::TryFrom;
 
-use chrono::{DateTime, FixedOffset, NaiveDateTime};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
 use postgres::types::ToSql;
 use serde::Deserialize;
 use std::fmt::Display;
@@ -54,17 +54,17 @@ impl Type {
 
     pub fn postgres_type(&self) -> postgres::types::Type {
         match self {
-            Type::Bool => postgres::types::BOOL,
-            Type::I32 => postgres::types::INT4,
-            Type::I64 => postgres::types::INT8,
-            Type::F32 => postgres::types::FLOAT4,
-            Type::F64 => postgres::types::FLOAT8,
-            Type::String => postgres::types::VARCHAR,
-            Type::Timestamp => postgres::types::TIMESTAMPTZ,
+            Type::Bool => postgres::types::Type::BOOL,
+            Type::I32 => postgres::types::Type::INT4,
+            Type::I64 => postgres::types::Type::INT8,
+            Type::F32 => postgres::types::Type::FLOAT4,
+            Type::F64 => postgres::types::Type::FLOAT8,
+            Type::String => postgres::types::Type::VARCHAR,
+            Type::Timestamp => postgres::types::Type::TIMESTAMPTZ,
         }
     }
 
-    pub fn json_to_sql(&self, key: &str, json: &serde_json::Value, required: bool) -> Result<Box<ToSql>, ConversionError> {
+    pub fn json_to_sql(&self, key: &str, json: &serde_json::Value, required: bool) -> Result<Box<dyn ToSql + Sync>, ConversionError> {
         match self {
             Type::Bool => unwrap_if_required(key, json.as_bool(), required),
             Type::I32 => unwrap_if_required(key, json.as_i64().map(|i| i32::try_from(i).ok()), required),
@@ -77,12 +77,12 @@ impl Type {
     }
 }
 
-pub fn header_to_sql<'a>(key: &str, value: Option<&'a str>, required: bool) -> Result<Box<ToSql + 'a>, ConversionError> {
+pub fn header_to_sql<'a>(key: &str, value: Option<&'a str>, required: bool) -> Result<Box<dyn ToSql + Sync + 'a>, ConversionError> {
     unwrap_if_required(key, value, required)
 }
 
-pub fn unwrap_if_required<'a, T>(key: &str, option: Option<T>, required: bool) -> Result<Box<ToSql + 'a>, ConversionError>
-    where T: ToSql + 'a
+pub fn unwrap_if_required<'a, T>(key: &str, option: Option<T>, required: bool) -> Result<Box<dyn ToSql + Sync + 'a>, ConversionError>
+    where T: ToSql + Sync + 'a
 {
     if required {
         Ok(Box::new(option.ok_or_else(|| ConversionError::MissingValue(key.to_string()))?))
@@ -94,8 +94,9 @@ pub fn unwrap_if_required<'a, T>(key: &str, option: Option<T>, required: bool) -
 fn json_to_date_time(json: &serde_json::Value) -> Result<Option<DateTime<FixedOffset>>, ConversionError> {
     if json.is_number() {
         let timestamp = json.as_f64().unwrap();
-        let naive = NaiveDateTime::from_timestamp(timestamp.floor() as i64, (1e9 * timestamp.fract()) as u32);
-        Ok(Some(DateTime::<FixedOffset>::from_utc(naive, FixedOffset::west(0))))
+        let naive = NaiveDateTime::from_timestamp_opt(timestamp.floor() as i64, (1e9 * timestamp.fract()) as u32).unwrap();
+        let offset = FixedOffset::west_opt(0).unwrap();
+        Ok(Some(TimeZone::from_utc_datetime(&offset, &naive)))
     } else if json.is_string() {
         Ok(Some(DateTime::parse_from_rfc3339(json.as_str().unwrap())
             .map_err(|err| ConversionError::TimestampFormat(err))?))

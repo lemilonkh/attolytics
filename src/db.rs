@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 
 use itertools::Itertools;
-use postgres::GenericConnection;
-use postgres::types::ToSql;
+use postgres::{types::ToSql, Transaction, Client};
 use rocket::http::HeaderMap;
 use crate::schema::{Schema, Table};
 use std::fmt::Display;
@@ -34,12 +33,12 @@ impl From<postgres::Error> for DbError {
     }
 }
 
-pub fn insert_event(table: &Table, conn: &GenericConnection, json: &serde_json::Value, headers: &HeaderMap) -> Result<(), DbError> {
+pub fn insert_event(table: &Table, conn: &mut Transaction, json: &serde_json::Value, headers: &HeaderMap) -> Result<(), DbError> {
     let query = format!(r#"INSERT INTO "{}" ({}) VALUES ({})"#,
                         table.name,
                         table.columns.iter().map(|column| format!(r#""{}""#, column.name)).join(", "),
                         (1..=table.columns.len()).map(|idx| format!("${}", idx)).join(", "));
-    let mut values = Vec::<Box<ToSql>>::with_capacity(table.columns.len());
+    let mut values = Vec::<Box<dyn ToSql + Sync>>::with_capacity(table.columns.len());
     for column in &table.columns {
         let value = match &column.header {
             Some(header) => header_to_sql(&column.name, headers.get(&header).next(), column.required),
@@ -48,11 +47,11 @@ pub fn insert_event(table: &Table, conn: &GenericConnection, json: &serde_json::
         values.push(value);
     }
     // println!("{} {:?}", query, values);
-    conn.execute(&query, &values.iter().map(|v| v.as_ref()).collect::<Vec<&ToSql>>())?;
+    conn.execute(&query, values.iter().map(|v| v.as_ref()).collect::<Vec<&(dyn ToSql + Sync)>>().as_slice())?;
     Ok(())
 }
 
-pub fn create_tables(schema: &Schema, conn: &GenericConnection) -> Result<(), DbError> {
+pub fn create_tables(schema: &Schema, conn: &mut Client) -> Result<(), DbError> {
     let existing_tables = conn.query(r#"
         SELECT relname
         FROM pg_catalog.pg_class
@@ -87,7 +86,7 @@ fn creation_query(table: &Table) -> String {
         "#, table.name, columns)
 }
 
-fn check_table(table: &Table, conn: &GenericConnection) -> Result<(), DbError> {
+fn check_table(table: &Table, conn: &mut Client) -> Result<(), DbError> {
     // https://stackoverflow.com/questions/20194806/how-to-get-a-list-column-names-and-datatype-of-a-table-in-postgresql
     let existing_columns = conn.query(r#"
         SELECT

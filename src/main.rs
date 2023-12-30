@@ -11,8 +11,9 @@ use std::ops::Deref;
 use std::process::exit;
 
 use clap::{AppSettings, Arg};
+use postgres::NoTls;
 use r2d2::Pool;
-use r2d2_postgres::{PostgresConnectionManager, TlsMode};
+use r2d2_postgres::PostgresConnectionManager;
 use rocket::{Config, State};
 use rocket::config::{Environment, Limits, LoggingLevel};
 use rocket::fairing;
@@ -64,7 +65,7 @@ fn events_cors_options(app: &App) -> rocket_cors::Cors {
         allowed_origins
     };
     rocket_cors::Cors {
-        allowed_origins: allowed_origins,
+        allowed_origins,
         allowed_methods: vec![Method::Post].into_iter().map(From::from).collect(),
         ..Default::default()
     }
@@ -84,7 +85,7 @@ fn events_post<'r>(
     headers: Headers<'r>,
     data: Json<EventPostData>,
     schema: State<'r, Schema>,
-    db_conn_pool: State<'r, Pool<PostgresConnectionManager>>)
+    db_conn_pool: State<'r, Pool<PostgresConnectionManager<NoTls>>>)
     -> Option<impl Responder<'r>>
 {
     // There should be a way to get rid of the clone() but I'm tired of fighting the borrow checker
@@ -104,12 +105,12 @@ fn events_post<'r>(
             }
         }
 
-        let conn = db_conn_pool.get()
+        let mut conn = db_conn_pool.get()
             .map_err(|err| {
                 println!("error connecting to database: {}", err);
                 Status::InternalServerError
             })?;
-        let trans = conn.transaction()
+        let mut trans = conn.transaction()
             .map_err(|err| {
                 println!("error starting transaction: {}", err);
                 Status::InternalServerError
@@ -119,7 +120,7 @@ fn events_post<'r>(
             let table_name = event["_t"].as_str().unwrap();
             let table = schema.tables.get(table_name)
                 .ok_or(Status::InternalServerError)?; // Table is in app.tables so it must be here.
-            db::insert_event(&table, &trans, &event, &*headers)
+            db::insert_event(&table, &mut trans, &event, &*headers)
                 .map_err(|err| {
                     println!("error inserting event into database: {}", err);
                     match err {
@@ -210,14 +211,14 @@ fn run() -> Result<(), RunError> {
     let schema = Schema::from_yaml(&schema_yaml_str)
         .map_err(|err| RunError(format!("failed to parse schema file {}: {}", schema_file_name, err)))?;
 
-    let manager = PostgresConnectionManager::new(matches.value_of("db_url").unwrap().to_owned(), TlsMode::None)
-        .map_err(|err| RunError(format!("failed to open database: {}", err)))?;
+    let manager = PostgresConnectionManager::new(matches.value_of("db_url").unwrap().to_owned().parse().unwrap(), NoTls);
+        // .map_err(|err| RunError(format!("failed to open database: {}", err)))?;
     let db_conn_pool = Pool::new(manager)
         .map_err(|err| RunError(format!("failed to create connection pool: {}", err)))?;
 
-    let conn = db_conn_pool.get()
+    let mut conn = db_conn_pool.get()
         .map_err(|err| RunError(format!("failed to create database connection: {}", err)))?;
-    db::create_tables(&schema, &*conn)
+    db::create_tables(&schema, &mut conn)
         .map_err(|err| RunError(format!("failed to initialize database tables: {}", err)))?;
 
     let verbosity = 1i32 + matches.occurrences_of("verbose") as i32 - matches.occurrences_of("quiet") as i32;

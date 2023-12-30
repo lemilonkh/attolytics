@@ -34,7 +34,7 @@ impl Default for Type {
 pub enum ConversionError {
     MissingValue(String),
     TimestampFormat(chrono::format::ParseError),
-    TimestampParsing(),
+    TimestampTooLarge(),
 }
 
 impl Display for ConversionError {
@@ -42,7 +42,7 @@ impl Display for ConversionError {
         match self {
             ConversionError::MissingValue(key) => write!(f, "required value \"{}\" was omitted", key),
             ConversionError::TimestampFormat(err) => write!(f, "could not parse timestamp: {}", err),
-            ConversionError::TimestampParsing() => write!(f, "could not parse timestamp"),
+            ConversionError::TimestampTooLarge() => write!(f, "could not parse timestame: value out of range"),
         }
     }
 }
@@ -99,7 +99,7 @@ fn json_to_date_time(json: &serde_json::Value) -> Result<Option<DateTime<FixedOf
         let naive = NaiveDateTime::from_timestamp_opt(timestamp.floor() as i64, (1e9 * timestamp.fract()) as u32);
         let offset = FixedOffset::west_opt(0).unwrap();
         if naive.is_none() {
-            Err(ConversionError::TimestampParsing())
+            Err(ConversionError::TimestampTooLarge())
         } else {
             Ok(Some(TimeZone::from_utc_datetime(&offset, &naive.unwrap())))
         }

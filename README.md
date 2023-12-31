@@ -1,7 +1,7 @@
 Attolytics
 ==========
 
-This fork is an updated version of the [base repository](https://github.com/ttencate/attolytics/) that supports compilation on modern Rust nightly versions (tested with rustc 1.77.0-nightly). The packages were updated to their newest versions.
+This fork is an updated version of the [base repository](https://github.com/ttencate/attolytics/) that supports compilation on modern Rust nightly versions (tested with rustc 1.77.0-nightly). The packages were updated to their newest versions. It also makes the systemd dependency optional and adds Docker support.
 
 Attolytics (a portmanteau of the SI prefix "atto" meaning 10<sup>-18</sup> and
 "analytics") is a small web service that receives analytics events and inserts

@@ -52,6 +52,12 @@ Running
 Deploying
 ---------
 
+To compile attolytics with support for systemd notifications, use the following build command:
+        
+        $ cargo build --release --features systemd
+
+This has been made an optional feature as on some systems (e.g. Docker containers), it's tricky to get access to libsystemd using pkg-config.
+
 Systemd launch notifications are supported. So to run Attolytics on a Linux
 machine with systemd behind an nginx proxy, a unit file like the following can
 be used:

@@ -16,13 +16,15 @@ use r2d2::Pool;
 use r2d2_postgres::PostgresConnectionManager;
 use rocket::{Config, State};
 use rocket::config::{Environment, Limits, LoggingLevel};
-use rocket::fairing;
 use rocket::http::{Method, Status, HeaderMap};
 use rocket::outcome::Outcome;
 use rocket::request::{FromRequest, Request};
 use rocket::response::Responder;
 use rocket_contrib::json::Json;
 use serde::Deserialize;
+
+#[cfg(feature = "systemd")]
+use rocket::fairing;
 
 use schema::{App, Schema};
 use db::DbError;
@@ -151,8 +153,10 @@ impl Display for RunError {
 
 impl Error for RunError {}
 
+#[cfg(feature = "systemd")]
 struct SystemdLaunchNotification {}
 
+#[cfg(feature = "systemd")]
 impl fairing::Fairing for SystemdLaunchNotification {
     fn info(&self) -> fairing::Info {
         fairing::Info { name: "systemd launch notifier", kind: fairing::Kind::Launch }
@@ -237,15 +241,21 @@ fn run() -> Result<(), RunError> {
         .finalize()
         .map_err(|err| RunError(format!("failed to create Rocket configuration: {}", err)))?;
 
-    let err = rocket::custom(config)
+    #[allow(unused_mut)]
+    let mut rocket = rocket::custom(config)
         .manage(schema)
         .manage(db_conn_pool)
         .mount("/", routes![
             events_options,
             events_post,
-        ])
-        .attach(SystemdLaunchNotification {})
-        .launch();
+        ]);
+
+    #[cfg(feature = "systemd")]
+    {
+        rocket = rocket.attach(SystemdLaunchNotification {});
+    }
+
+    let err = rocket.launch();
     Err(RunError(format!("failed to launch web server: {}", err)))
 }
 

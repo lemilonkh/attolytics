@@ -14,13 +14,15 @@ use clap::{arg, Command, value_parser};
 use postgres::NoTls;
 use r2d2::Pool;
 use r2d2_postgres::PostgresConnectionManager;
+use rocket::config::LogLevel;
+use rocket::data::{Limits, ToByteUnit};
+use rocket::figment::providers::Env;
 use rocket::{Config, State};
-use rocket::config::{Environment, Limits, LoggingLevel};
 use rocket::http::{Method, Status, HeaderMap};
 use rocket::outcome::Outcome;
 use rocket::request::{FromRequest, Request};
 use rocket::response::Responder;
-use rocket_contrib::json::Json;
+use rocket::serde::json::Json;
 use serde::Deserialize;
 
 #[cfg(feature = "systemd")]
@@ -42,9 +44,10 @@ struct EventPostData {
 #[derive(Debug)]
 struct Headers<'a>(&'a HeaderMap<'a>);
 
-impl<'a, 'r> FromRequest<'a, 'r> for Headers<'a> {
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for Headers<'r> {
     type Error = !;
-    fn from_request(request: &'a Request<'r>) -> rocket::request::Outcome<Self, Self::Error> {
+    async fn from_request(request: &'r Request<'_>) -> rocket::request::Outcome<Self, Self::Error> {
         Outcome::Success(Headers(request.headers()))
     }
 }
@@ -60,35 +63,31 @@ fn events_cors_options(app: &App) -> rocket_cors::Cors {
     let allowed_origins = if app.access_control_allow_origin == "*" {
         rocket_cors::AllowedOrigins::all()
     } else {
-        let (allowed_origins, failed_origins) = rocket_cors::AllowedOrigins::some(&[&app.access_control_allow_origin]);
-        if !failed_origins.is_empty() {
-            eprintln!("failed to process CORS origins: {:?}", failed_origins)
-        }
-        allowed_origins
+        rocket_cors::AllowedOrigins::some_exact(&[&app.access_control_allow_origin])
     };
-    rocket_cors::Cors {
+    rocket_cors::CorsOptions {
         allowed_origins,
         allowed_methods: vec![Method::Post].into_iter().map(From::from).collect(),
         ..Default::default()
-    }
+    }.to_cors().expect("valid CORS options")
 }
 
 #[options("/apps/<app_id>/events")]
-fn events_options<'r>(app_id: String, schema: State<Schema>)
-    -> Option<impl Responder<'r>>
+fn events_options<'r, 'o: 'r>(app_id: String, schema: &State<Schema>)
+    -> Option<impl Responder<'r, 'o>>
 {
     let app = schema.apps.get(&app_id)?;
     Some(events_cors_options(app).respond_owned(|guard| guard.responder("".to_string())))
 }
 
 #[post("/apps/<app_id>/events", format = "json", data = "<data>")]
-fn events_post<'r>(
+fn events_post<'r, 'o: 'r>(
     app_id: String,
     headers: Headers<'r>,
     data: Json<EventPostData>,
-    schema: State<'r, Schema>,
-    db_conn_pool: State<'r, Pool<PostgresConnectionManager<NoTls>>>)
-    -> Option<impl Responder<'r>>
+    schema: &'r State<Schema>,
+    db_conn_pool: &'r State<Pool<PostgresConnectionManager<NoTls>>>)
+    -> Option<impl Responder<'r, 'o>>
 {
     // There should be a way to get rid of the clone() but I'm tired of fighting the borrow checker
     // over it.
@@ -176,7 +175,7 @@ impl fairing::Fairing for SystemdLaunchNotification {
     }
 }
 
-fn run() -> Result<(), RunError> {
+async fn run() -> Result<(), RunError> {
     let matches = Command::new("Attolytics")
         .bin_name("attolytics")
         .author(clap::crate_authors!())
@@ -226,20 +225,19 @@ fn run() -> Result<(), RunError> {
 
     let verbosity = 1i32 + *matches.get_one::<u8>("verbose").unwrap() as i32 - *matches.get_one::<u8>("quiet").unwrap() as i32;
     let logging_level = match verbosity {
-        0 => LoggingLevel::Off,
-        1 => LoggingLevel::Critical,
-        2 => LoggingLevel::Normal,
-        3 => LoggingLevel::Debug,
-        _ => if verbosity < 0 { LoggingLevel::Off } else { LoggingLevel::Debug },
+        0 => LogLevel::Off,
+        1 => LogLevel::Critical,
+        2 => LogLevel::Normal,
+        3 => LogLevel::Debug,
+        _ => if verbosity < 0 { LogLevel::Off } else { LogLevel::Debug },
     };
-    let config = Config::build(Environment::active().map_err(|err| RunError(format!("invalid ROCKET_ENV value: {}", err)))?)
-        .address(matches.get_one::<String>("host").unwrap())
-        .port(*matches.get_one::<u16>("port").unwrap())
-        .keep_alive(0)
-        .log_level(logging_level)
-        .limits(Limits::new().limit("json", 32 * 1024))
-        .finalize()
-        .map_err(|err| RunError(format!("failed to create Rocket configuration: {}", err)))?;
+    let config = Config::figment()
+        .merge(Env::prefixed("APP_").global())
+        .merge(("address", matches.get_one::<String>("host").unwrap()))
+        .merge(("port", *matches.get_one::<u16>("port").unwrap()))
+        .merge(("keep_alive", 0))
+        .merge(("log_level", logging_level))
+        .merge(("limits", Limits::default().limit("json", 32.kibibytes())));
 
     #[allow(unused_mut)]
     let mut rocket = rocket::custom(config)
@@ -255,12 +253,16 @@ fn run() -> Result<(), RunError> {
         rocket = rocket.attach(SystemdLaunchNotification {});
     }
 
-    let err = rocket.launch();
-    Err(RunError(format!("failed to launch web server: {}", err)))
+    let res = rocket.launch().await;
+    if res.is_err() {
+        return Err(RunError(format!("failed to launch web server: {}", res.err().unwrap())));
+    }
+    Ok(())
 }
 
-fn main() {
-    if let Err(RunError(msg)) = run() {
+#[rocket::main]
+async fn main() {
+    if let Err(RunError(msg)) = run().await {
         eprintln!("error: {}", msg);
         exit(1);
     } else {

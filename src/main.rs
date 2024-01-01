@@ -26,7 +26,7 @@ use rocket::serde::json::Json;
 use serde::Deserialize;
 
 #[cfg(feature = "systemd")]
-use rocket::fairing;
+use rocket::fairing::AdHoc;
 
 use schema::{App, Schema};
 use db::DbError;
@@ -86,9 +86,8 @@ fn events_post<'r, 'o: 'r>(
     headers: Headers<'r>,
     data: Json<EventPostData>,
     schema: &'r State<Schema>,
-    db_conn_pool: &'r State<Pool<PostgresConnectionManager<NoTls>>>)
-    -> Option<impl Responder<'r, 'o>>
-{
+    db_conn_pool: &'r State<Pool<PostgresConnectionManager<NoTls>>>
+) -> Option<impl Responder<'r, 'o>> {
     // There should be a way to get rid of the clone() but I'm tired of fighting the borrow checker
     // over it.
     let app = schema.apps.get(&app_id)?.clone();
@@ -151,29 +150,6 @@ impl Display for RunError {
 }
 
 impl Error for RunError {}
-
-#[cfg(feature = "systemd")]
-struct SystemdLaunchNotification {}
-
-#[cfg(feature = "systemd")]
-impl fairing::Fairing for SystemdLaunchNotification {
-    fn info(&self) -> fairing::Info {
-        fairing::Info { name: "systemd launch notifier", kind: fairing::Kind::Launch }
-    }
-
-    // "A launch callback, represented by the Fairing::on_launch() method, is called immediately
-    // before the Rocket application has launched. At this point, Rocket has opened a socket for
-    // listening but has not yet begun accepting connections."
-    // It would be better if we could wait for the latter too, but there seems to be no support for
-    // that in Rocket.
-    fn on_launch(&self, _rocket: &rocket::Rocket) {
-        match systemd::daemon::notify(true /* unset_environment */, [(systemd::daemon::STATE_READY, "1")].iter()) {
-            Ok(true) => {},
-            Ok(false) => eprintln!("failed to contact systemd"),
-            Err(err) => eprintln!("failed to notify systemd of launch: {}", err),
-        }
-    }
-}
 
 async fn run() -> Result<(), RunError> {
     let matches = Command::new("Attolytics")
@@ -250,7 +226,18 @@ async fn run() -> Result<(), RunError> {
 
     #[cfg(feature = "systemd")]
     {
-        rocket = rocket.attach(SystemdLaunchNotification {});
+        // "A launch callback, represented by the Fairing::on_launch() method, is called immediately
+        // before the Rocket application has launched. At this point, Rocket has opened a socket for
+        // listening but has not yet begun accepting connections."
+        // It would be better if we could wait for the latter too, but there seems to be no support for
+        // that in Rocket.
+        rocket = rocket.attach(AdHoc::on_liftoff("systemd launch notifier", |_| Box::pin(async move {
+            match systemd::daemon::notify(true /* unset_environment */, [(systemd::daemon::STATE_READY, "1")].iter()) {
+                Ok(true) => {},
+                Ok(false) => eprintln!("failed to contact systemd"),
+                Err(err) => eprintln!("failed to notify systemd of launch: {}", err),
+            }
+        })));
     }
 
     let res = rocket.launch().await;
